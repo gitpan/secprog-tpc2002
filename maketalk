@@ -1,0 +1,44 @@
+#!/usr/bin/perl
+
+use strict;
+
+undef $/;
+my $html=<>;
+
+$html=~s/<!--\s.*?-->//gs;
+$html=~s(<A\s+HREF="(?:#|mailto:)[^"]*">(.*?)</A>)($1)gs;
+
+$html=~s/^(.*<BODY\b[^<]*>\s*)//si
+  and my $head=$1
+    or die "Can't get head\n";
+$html=~s#(</BODY>.*)##si
+  and my $foot=$1
+    or die "Can't get foot\n";
+
+my @pages=split /<HR\b[^>]*>\s*/i,$html;
+foreach(@pages){
+  s/<P>\s*(<H|$)/$1/i;
+}
+
+print
+  $head,
+  map(qq(
+    <TABLE height="100%">
+      <TR align=left valign=top height="100%">
+	<TD align=left valign=top height="100%">
+	  $_
+	</TD>
+      </TR>
+    </TABLE>
+  ),@pages),
+  qq(
+    <TABLE height="100%">
+      <TR height="100%">
+	<TD height="100%">&nbsp;</TD>
+      </TR>
+    </TABLE>
+  ),
+  $foot,
+;
+
+

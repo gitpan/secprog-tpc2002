@@ -1,0 +1,17 @@
+#!/usr/bin/perl
+
+use strict;
+
+undef $/;
+my $pod=<>;
+
+
+while($pod=~/^(=head1\s+[^\n]*)(?:(?!^=head1).?)+?^=cut\s+(.*?)(?=^=head1|\z)/smg){
+  my($head,$notes)=($1,$2);
+  next unless $notes=~/\S/;
+  $notes=~s/\s+$/\n\n\cL\n/g;
+
+  print "$head\n\n$notes";
+}
+
+exit 0;

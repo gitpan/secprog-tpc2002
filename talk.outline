@@ -1,0 +1,111 @@
+DONE
+Intro
+  Implicit trust -> eventual disaster
+  No trust -> safety
+
+DONE
+Robustness
+  use strict
+  use warnings
+  perl -T
+  check all return codes
+  check "this can never happen" cases
+
+DONE
+Tainting
+  Data from user is tainted
+    @ARGV, %ENV
+    <>, read(), readline(), ``, qx(), etc
+    shmread(), msgrcv(), getpw*(), etc
+  Tainted data can't be used to affect outside world
+    ``, qx(), system EXPR, exec EXPR
+    open() for writing
+    unlink(), mkdir(), umask(), chmod(), etc
+  Untainting
+    $1, $2 untainted since it's assumed your pattern only matches safe values
+
+DONE
+Validate user input
+  Allow safe; don't disallow unsafe
+  Make tests consistent
+  Numbers
+
+DONE
+Filenames
+  Poison null byte
+  Disallow full paths
+
+DONE
+Don't use magic open()
+
+Web apps
+  DONE
+  Form spoofing
+    Hidden fields aren't secure
+    Expect multiple values
+      Scalar/list context problems of param()
+	this is just a specific example of a generic problem
+    Expect unexpected fields
+    Don't expect expected fields
+    Expect unexpected values
+  DONE
+  Cookies
+    are mostly like hidden form fields as far as security goes
+    Use message digest for security
+      can also use for hidden fields
+    Check expiry dates
+  Display data safely
+    escape, set charset
+    restrict HTML allowed
+      show regex just to show how complicated even simple restriction is
+    restrict URLs
+
+DONE
+Dynamic method names
+  $obj->$meth() works if $meth is a valid method name
+  Even if $meth eq 'Other::Class::methname'
+  Tainting doesn't make any difference, since this is internal
+
+
+
+
+Child processes
+  Sanitise environment
+  Exclude shell
+  Do own redirection
+
+Race conditions
+  File locking
+    Don't explicitly unlock
+    Don't upgrade shared to exclusive
+    Use locks consistently
+    Avoid deadlock
+  Temp files/dirs
+    Use safe library
+      show some safe usages
+    Clean up after yourself
+
+Databases
+  Quote correctly
+  Generate sequences safely
+  Ensure correct formatting
+
+eval()
+  Use eval BLOCK instead of eval EXPR
+  Use m/\Q$foo\E/ instead of m/$foo/
+  Dont' use s///ee unless you really know what you're doing
+    or s///eee or longer unless you're insane
+
+Global variables
+  Try not to use them
+  Only use them for values which don't change, like paths and email addreses
+  Localise settings to punctuation vars
+  Beware of implicit localisation
+
+
+
+
+
+
+
+
